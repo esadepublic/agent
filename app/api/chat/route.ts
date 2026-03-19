@@ -51,7 +51,7 @@ function extractMeta(html: string): { date: string; authors: string } {
  
     // Eliminem el comptador de comentaris i tot el que ve després
     const beforeComments = afterDate
-      .replace(/\d+\s*(?:Comentaris|Comentarios|Comments).*/is, "")
+      .replace(/\d+\s*(?:Comentaris|Comentarios|Comments)[\s\S]*/i, "")
       .trim();
  
     // Primera línia significativa = autors
