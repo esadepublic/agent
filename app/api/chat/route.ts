@@ -21,55 +21,7 @@ interface ChatRequest {
   lang: Lang;
 }
  
-// Extreu data i autors del bloc HTML entre els <hr> que conté la data
-function extractMeta(html: string): { date: string; authors: string } {
-  const mesos =
-    "gener|febrer|març|abril|maig|juny|juliol|agost|setembre|octubre|novembre|desembre|" +
-    "enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre|" +
-    "january|february|march|april|may|june|july|august|september|october|november|december";
-  const dateRe = new RegExp(
-    `(?:${mesos})[^<,]*,?\\s*\\d{1,2}\\s+\\d{4}|\\d{2}-\\d{2}-\\d{4}`,
-    "i"
-  );
- 
-  // Partim per <hr> i busquem el segment amb la data
-  const segments = html.split(/<hr\s*\/?>/i);
-  for (const seg of segments) {
-    const dm = seg.match(dateRe);
-    if (!dm) continue;
- 
-    const date = dm[0].trim();
- 
-    // Netegem el segment de tags HTML
-    const clean = seg
-      .replace(/<[^>]+>/g, " ")
-      .replace(/\s+/g, " ")
-      .trim();
- 
-    // Agafem el text que ve després de la data
-    const afterDate = clean.slice(clean.indexOf(date) + date.length).trim();
- 
-    // Eliminem el comptador de comentaris i tot el que ve després
-    const beforeComments = afterDate
-      .replace(/\d+\s*(?:Comentaris|Comentarios|Comments)[\s\S]*/i, "")
-      .trim();
- 
-    // Primera línia significativa = autors
-    const authors = beforeComments
-      .split(/\s{3,}/)
-      .map((s: string) => s.trim())
-      .filter((s: string) => s.length > 2)
-      .filter((s: string) =>
-        !["subscripcions", "identificar", "consell", "esade.edu", "http", "partners"]
-          .some((w) => s.toLowerCase().includes(w))
-      )[0] || "Redacció";
- 
-    return { date, authors };
-  }
-  return { date: "", authors: "Redacció" };
-}
- 
-// Llegeix un article de PUBLIC i retorna un bloc estructurat
+// Llegeix un article de PUBLIC i retorna les seves metadades estructurades
 async function fetchArticle(url: string): Promise<string> {
   try {
     const res = await fetch(url, {
@@ -82,23 +34,63 @@ async function fetchArticle(url: string): Promise<string> {
     if (!res.ok) return "";
     const html = await res.text();
  
-    // Títol
+    // Títol des de <title>Public :: TÍTOL</title>
     const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
     const rawTitle = titleMatch ? titleMatch[1] : "";
     const title = rawTitle.includes("::")
       ? rawTitle.split("::").slice(1).join("::").trim()
       : rawTitle.trim();
  
-    // Data i autors
-    const { date, authors } = extractMeta(html);
+    // Data i autors: estan en el segment HTML entre dos <hr>
+    // Estructura: <hr> → data → autors → "N Comentaris" → <hr>
+    const mesos =
+      "gener|febrer|març|abril|maig|juny|juliol|agost|setembre|octubre|novembre|desembre|" +
+      "enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre|" +
+      "january|february|march|april|may|june|july|august|september|october|november|december";
+    const dateRe = new RegExp(
+      `((?:${mesos})[^<,]*,?\\s*\\d{1,2}\\s+\\d{4}|\\d{2}-\\d{2}-\\d{4})`,
+      "i"
+    );
  
-    // Contingut principal
+    let date = "";
+    let authors = "Redacció";
+ 
+    const segments = html.split(/<hr\s*\/?>/i);
+    for (const seg of segments) {
+      const dm = seg.match(dateRe);
+      if (!dm) continue;
+      date = dm[1].trim();
+ 
+      const clean = seg
+        .replace(/<[^>]+>/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+ 
+      const afterDate = clean.slice(clean.indexOf(date) + date.length).trim();
+      const beforeComments = afterDate
+        .replace(/\d+\s*(?:Comentaris|Comentarios|Comments)[\s\S]*/i, "")
+        .trim();
+ 
+      const candidate = beforeComments
+        .split(/\s{3,}/)
+        .map((s: string) => s.trim())
+        .filter(
+          (s: string) =>
+            s.length > 2 &&
+            !["subscripcions", "identificar", "consell", "esade.edu", "http", "partners"].some(
+              (w) => s.toLowerCase().includes(w)
+            )
+        )[0];
+ 
+      if (candidate) authors = candidate;
+      break;
+    }
+ 
+    // Contingut principal (sense capçalera ni peu)
     const startIdx = html.indexOf("<h3");
     const endIdx = html.search(/Compartir (?:aquesta|esta|this)/i);
     const bodyHtml =
-      startIdx >= 0 && endIdx > startIdx
-        ? html.slice(startIdx, endIdx)
-        : html.slice(0, 20000);
+      startIdx >= 0 && endIdx > startIdx ? html.slice(startIdx, endIdx) : html;
  
     const body = bodyHtml
       .replace(/<script[\s\S]*?<\/script>/gi, "")
@@ -106,30 +98,22 @@ async function fetchArticle(url: string): Promise<string> {
       .replace(/<[^>]+>/g, " ")
       .replace(/\s+/g, " ")
       .trim()
-      .slice(0, 4000);
+      .slice(0, 3000);
  
-    return [
-      `URL: ${url}`,
-      `TÍTOL: ${title}`,
-      `DATA: ${date || "no disponible"}`,
-      `AUTORS: ${authors}`,
-      `CONTINGUT:`,
-      body,
-    ].join("\n");
+    return [`URL: ${url}`, `TÍTOL: ${title}`, `DATA: ${date || "no disponible"}`, `AUTORS: ${authors}`, `CONTINGUT: ${body}`].join("\n");
   } catch {
     return "";
   }
 }
  
-// Extreu totes les URLs de PUBLIC d'un objecte (recursivament)
+// Extreu totes les URLs de PUBLIC recursivament de qualsevol objecte
 function extractPublicUrls(obj: any): string[] {
   const urls = new Set<string>();
-  const urlRe = /https?:\/\/esadepublic\.esade\.edu\/posts\/post\/[a-zA-Z0-9_-]+/g;
- 
+  const re = /https?:\/\/esadepublic\.esade\.edu\/posts\/post\/[a-zA-Z0-9_-]+/g;
   function walk(node: any) {
     if (!node) return;
     if (typeof node === "string") {
-      for (const m of node.matchAll(urlRe)) urls.add(m[0]);
+      for (const m of node.matchAll(re)) urls.add(m[0]);
     } else if (Array.isArray(node)) {
       node.forEach(walk);
     } else if (typeof node === "object") {
@@ -137,7 +121,7 @@ function extractPublicUrls(obj: any): string[] {
     }
   }
   walk(obj);
-  return [...urls].slice(0, 5);
+  return [...urls];
 }
  
 export async function POST(request: NextRequest) {
@@ -158,7 +142,6 @@ export async function POST(request: NextRequest) {
   const apiMessages = messages
     .filter((m) => m.content !== welcomeContent)
     .map((m) => ({ role: m.role, content: m.content }));
- 
   if (apiMessages.length === 0)
     return NextResponse.json({ error: "No hi ha missatges vàlids" }, { status: 400 });
  
@@ -167,11 +150,12 @@ export async function POST(request: NextRequest) {
   let currentMessages: any[] = apiMessages;
   let finalText = "";
  
-  // Acumulem totes les URLs trobades durant tot el bucle
-  const allFoundUrls = new Set<string>();
+  // Acumulem totes les URLs trobades durant el bucle
+  const allUrls = new Set<string>();
+  const fetchedUrls = new Set<string>();
  
   try {
-    for (let i = 0; i < 10; i++) {
+    for (let i = 0; i < 12; i++) {
       const response: any = await (client.messages.create as any)({
         model: "claude-sonnet-4-20250514",
         max_tokens: 2000,
@@ -185,33 +169,32 @@ export async function POST(request: NextRequest) {
         .map((b: any) => b.text)
         .join("\n");
       if (textBlocks) finalText = textBlocks;
- 
-      if (response.stop_reason === "end_turn") {
-        // Última oportunitat: llegim els articles que hem acumulat durant el bucle
-        // i els injectem com a missatge addicional d'usuari si l'agent no els ha llegit
-        break;
-      }
+      if (response.stop_reason === "end_turn") break;
  
       if (response.stop_reason === "tool_use") {
         const toolUseBlocks = (response.content as any[]).filter(
           (b: any) => b.type === "tool_use"
         );
  
-        // Cerquem URLs recursivament a tota la resposta
-        const newUrls = extractPublicUrls(response.content);
-        newUrls.forEach((u) => allFoundUrls.add(u));
+        // Extraiem URLs noves de tota la resposta
+        const newUrls = extractPublicUrls(response.content).filter(
+          (u) => !fetchedUrls.has(u)
+        );
+        newUrls.forEach((u) => allUrls.add(u));
  
-        // Llegim els articles nous (que no hem llegit encara)
-        const urlsToFetch = newUrls.filter((u) => !allFoundUrls.has(u + "_done"));
+        // Llegim tots els articles nous en paral·lel
         let articleContext = "";
- 
-        if (urlsToFetch.length > 0) {
-          const articles = await Promise.all(urlsToFetch.map(fetchArticle));
-          urlsToFetch.forEach((u) => allFoundUrls.add(u + "_done"));
+        if (newUrls.length > 0) {
+          const articles = await Promise.all(
+            newUrls.slice(0, 8).map(async (u) => {
+              fetchedUrls.add(u);
+              return fetchArticle(u);
+            })
+          );
           const valid = articles.filter((a) => a.length > 0);
           if (valid.length > 0) {
             articleContext =
-              "\n\n[ARTICLES LLEGITS PEL SERVIDOR — usa TÍTOL, DATA i AUTORS exactament]\n\n" +
+              "\n\n[ARTICLES LLEGITS — usa TÍTOL, DATA i AUTORS exactament com apareixen]\n\n" +
               valid.join("\n\n---\n\n");
           }
         }
@@ -229,47 +212,6 @@ export async function POST(request: NextRequest) {
         ];
       } else {
         break;
-      }
-    }
- 
-    // Si l'agent ha generat text però hi ha URLs que no hem pogut llegir,
-    // injectem els articles com a context per una darrera iteració
-    if (allFoundUrls.size > 0 && finalText) {
-      const unread = [...allFoundUrls]
-        .filter((u) => !u.endsWith("_done"))
-        .slice(0, 3);
- 
-      if (unread.length > 0) {
-        const articles = await Promise.all(unread.map(fetchArticle));
-        const valid = articles.filter((a) => a.length > 0);
- 
-        if (valid.length > 0) {
-          // Demanem a l'agent que millori la resposta amb les metadades correctes
-          const improvePrompt =
-            `Millora la secció "📄 Articles consultats:" de la teva resposta anterior ` +
-            `substituint qualsevol "Redacció" i "Sense data" per les dades correctes ` +
-            `d'aquests articles:\n\n` +
-            valid.join("\n\n---\n\n") +
-            `\n\nTorna la resposta completa millorada.`;
- 
-          const improveResp: any = await (client.messages.create as any)({
-            model: "claude-sonnet-4-20250514",
-            max_tokens: 2000,
-            system: systemPrompt,
-            tools: [],
-            messages: [
-              ...currentMessages,
-              { role: "assistant", content: finalText },
-              { role: "user", content: improvePrompt },
-            ],
-          });
- 
-          const improved = improveResp.content
-            .filter((b: any) => b.type === "text")
-            .map((b: any) => b.text)
-            .join("\n");
-          if (improved) finalText = improved;
-        }
       }
     }
  
