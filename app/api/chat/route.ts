@@ -1,5 +1,6 @@
 // app/api/chat/route.ts
 // Backend segur — la clau ANTHROPIC_API_KEY mai arriba al navegador.
+// Llegeix els articles de PUBLIC directament i extreu autors i data.
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -19,6 +20,65 @@ interface ChatMessage {
 interface ChatRequest {
   messages: ChatMessage[];
   lang: Lang;
+}
+
+// Llegeix un article de PUBLIC i retorna el contingut net amb metadades
+async function fetchArticle(url: string): Promise<string> {
+  try {
+    const res = await fetch(url, {
+      headers: { "User-Agent": "Mozilla/5.0", "Accept-Language": "ca" },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) return `Error llegint ${url}`;
+    const html = await res.text();
+
+    // Extreu el títol
+    const titleMatch = html.match(/<h3[^>]*>\s*<a[^>]*>([^<]+)<\/a>\s*<\/h3>/);
+    const title = titleMatch ? titleMatch[1].trim() : "";
+
+    // Extreu data i autors: apareixen entre el segon "---" i el tercer "---"
+    // Estructura real: ... <img...> --- [data] [autors] [comentaris] ---
+    // En el HTML, data i autors estan en un bloc separat per <hr> tags
+    
+    // Data: format "febrer, 01 2026" o "01-02-2026"
+    const dateMatch = html.match(
+      /(\d{2}-\d{2}-\d{4})|((gener|febrer|març|abril|maig|juny|juliol|agost|setembre|octubre|novembre|desembre|enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre|january|february|march|april|may|june|july|august|september|october|november|december),?\s+\d{1,2}\s+\d{4})/i
+    );
+    const date = dateMatch ? dateMatch[0].trim() : "";
+
+    // Autors: apareixen just després de la data i abans de "Comentaris/Comentarios/Comments"
+    // En el HTML net (sense tags), la seqüència és: [data]\n\n[autors]\n\n[X Comentaris]
+    const cleanText = html
+      .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
+      .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
+      .replace(/<[^>]+>/g, "\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+
+    // Busquem la seqüència: data → autors → comentaris
+    const authorMatch = cleanText.match(
+      /(?:(?:\d{2}-\d{2}-\d{4})|(?:(?:gener|febrer|març|abril|maig|juny|juliol|agost|setembre|octubre|novembre|desembre|enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre|january|february|march|april|may|june|july|august|september|october|november|december)[^\n]+\d{4}))\s*\n+\s*([^\n]+)\s*\n+\s*\d+\s*(?:Comentaris|Comentarios|Comments)/i
+    );
+    const authors = authorMatch ? authorMatch[1].trim() : "";
+
+    // Extreu el contingut principal (entre el primer i l'últim separador de contingut)
+    // Eliminem capçalera, peu i botons
+    const bodyStart = cleanText.indexOf(title || "");
+    const bodyEnd = cleanText.indexOf("Compartir aquesta");
+    const body = bodyStart >= 0 && bodyEnd > bodyStart
+      ? cleanText.slice(bodyStart, bodyEnd).trim()
+      : cleanText.slice(0, 6000);
+
+    return `URL: ${url}
+TÍTOL: ${title}
+DATA: ${date}
+AUTORS: ${authors || "Redacció"}
+CONTINGUT:
+${body.slice(0, 5000)}`;
+
+  } catch {
+    return `Error llegint l'article: ${url}`;
+  }
 }
 
 export async function POST(request: NextRequest) {
@@ -49,15 +109,10 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "No hi ha missatges vàlids" }, { status: 400 });
   }
 
-  // 3. System prompt reforçat per llegir contingut complet dels articles
+  // 3. Bucle agèntic
   const systemPrompt = UI[lang].systemPrompt;
-
-  // 4. Eines disponibles: web_search per cercar + web_fetch per llegir articles complets
   const tools: any[] = [
-    {
-      type: "web_search_20250305",
-      name: "web_search",
-    },
+    { type: "web_search_20250305", name: "web_search" },
   ];
 
   let currentMessages: any[] = apiMessages;
@@ -73,7 +128,6 @@ export async function POST(request: NextRequest) {
         messages: currentMessages,
       });
 
-      // Recollim text
       const textBlocks = (response.content as any[])
         .filter((b: any) => b.type === "text")
         .map((b: any) => b.text)
@@ -87,43 +141,24 @@ export async function POST(request: NextRequest) {
           (b: any) => b.type === "tool_use"
         );
 
-        // Processem cada tool_use: si és web_search, retornem els resultats
-        // L'agent pot fer múltiples cerques i llegir múltiples pàgines
         const toolResults = await Promise.all(
           toolUseBlocks.map(async (block: any) => {
-            // Per a web_fetch manual d'articles de PUBLIC
+            // Si l'agent demana llegir un article de PUBLIC, el llegim nosaltres
+            // i li retornem el contingut amb autors i data ben extrets
             if (
-              block.name === "web_fetch" &&
-              block.input?.url?.includes("esadepublic.esade.edu/posts/")
+              block.name === "web_search" &&
+              typeof block.input?.query === "string" &&
+              block.input.query.includes("esadepublic.esade.edu/posts")
             ) {
-              try {
-                const res = await fetch(block.input.url, {
-                  headers: { "User-Agent": "Mozilla/5.0" },
-                });
-                const html = await res.text();
-                // Extreu el text principal eliminant HTML
-                const text = html
-                  .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
-                  .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
-                  .replace(/<[^>]+>/g, " ")
-                  .replace(/\s+/g, " ")
-                  .trim()
-                  .slice(0, 8000); // Limitem per no superar el context
-                return {
-                  type: "tool_result",
-                  tool_use_id: block.id,
-                  content: text,
-                };
-              } catch {
-                return {
-                  type: "tool_result",
-                  tool_use_id: block.id,
-                  content: "Error llegint l'article",
-                };
-              }
+              // Deixem que web_search funcioni normalment
+              return {
+                type: "tool_result",
+                tool_use_id: block.id,
+                content: "Tool executed",
+              };
             }
 
-            // Per a web_search i altres eines, retornem confirmació
+            // Per a qualsevol altra eina
             return {
               type: "tool_result",
               tool_use_id: block.id,
@@ -132,10 +167,45 @@ export async function POST(request: NextRequest) {
           })
         );
 
+        // Detectem si la resposta de cerca conté URLs de PUBLIC
+        // i les llegim proactivament per afegir metadades
+        const searchResultsText = (response.content as any[])
+          .filter((b: any) => b.type === "tool_use" && b.name === "web_search")
+          .map((b: any) => JSON.stringify(b.input))
+          .join(" ");
+
+        // Extraiem URLs de PUBLIC dels resultats (les passarem a l'agent)
+        const publicUrls = [
+          ...new Set(
+            [...(searchResultsText.matchAll(/https:\/\/esadepublic\.esade\.edu\/posts\/post\/[a-z0-9-]+/g))]
+              .map((m) => m[0])
+              .slice(0, 4) // Màxim 4 articles per no superar el temps
+          ),
+        ];
+
+        // Si hem trobat URLs, les llegim i injectem el contingut com a context addicional
+        let articleContext = "";
+        if (publicUrls.length > 0) {
+          const articleContents = await Promise.all(
+            publicUrls.map((url) => fetchArticle(url))
+          );
+          articleContext =
+            "\n\n[CONTINGUT DELS ARTICLES LLEGITS AL SERVIDOR]\n" +
+            articleContents.join("\n\n---\n\n");
+        }
+
+        // Afegim el context dels articles als tool results
+        const enrichedResults = toolResults.map((r: any, idx: number) => {
+          if (idx === 0 && articleContext) {
+            return { ...r, content: "Tool executed" + articleContext };
+          }
+          return r;
+        });
+
         currentMessages = [
           ...currentMessages,
           { role: "assistant", content: response.content },
-          { role: "user", content: toolResults },
+          { role: "user", content: enrichedResults },
         ];
       } else {
         break;
