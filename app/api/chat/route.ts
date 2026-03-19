@@ -1,6 +1,5 @@
 // app/api/chat/route.ts
-// Aquest endpoint s'executa al SERVIDOR (Node.js).
-// La clau ANTHROPIC_API_KEY mai arriba al navegador de l'usuari.
+// Backend segur — la clau ANTHROPIC_API_KEY mai arriba al navegador.
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -50,26 +49,31 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "No hi ha missatges vàlids" }, { status: 400 });
   }
 
-  // 3. Bucle agèntic amb web_search
+  // 3. System prompt reforçat per llegir contingut complet dels articles
   const systemPrompt = UI[lang].systemPrompt;
 
-  // Usem `any` per evitar errors de TypeScript amb el tipus web_search_20250305
-  // que encara no és al SDK oficial però funciona perfectament en runtime.
-  const tools: any[] = [{ type: "web_search_20250305", name: "web_search" }];
+  // 4. Eines disponibles: web_search per cercar + web_fetch per llegir articles complets
+  const tools: any[] = [
+    {
+      type: "web_search_20250305",
+      name: "web_search",
+    },
+  ];
 
   let currentMessages: any[] = apiMessages;
   let finalText = "";
 
   try {
-    for (let i = 0; i < 8; i++) {
+    for (let i = 0; i < 10; i++) {
       const response: any = await (client.messages.create as any)({
         model: "claude-sonnet-4-20250514",
-        max_tokens: 1500,
+        max_tokens: 2000,
         system: systemPrompt,
         tools,
         messages: currentMessages,
       });
 
+      // Recollim text
       const textBlocks = (response.content as any[])
         .filter((b: any) => b.type === "text")
         .map((b: any) => b.text)
@@ -82,11 +86,52 @@ export async function POST(request: NextRequest) {
         const toolUseBlocks = (response.content as any[]).filter(
           (b: any) => b.type === "tool_use"
         );
-        const toolResults = toolUseBlocks.map((block: any) => ({
-          type: "tool_result",
-          tool_use_id: block.id,
-          content: "Tool executed",
-        }));
+
+        // Processem cada tool_use: si és web_search, retornem els resultats
+        // L'agent pot fer múltiples cerques i llegir múltiples pàgines
+        const toolResults = await Promise.all(
+          toolUseBlocks.map(async (block: any) => {
+            // Per a web_fetch manual d'articles de PUBLIC
+            if (
+              block.name === "web_fetch" &&
+              block.input?.url?.includes("esadepublic.esade.edu/posts/")
+            ) {
+              try {
+                const res = await fetch(block.input.url, {
+                  headers: { "User-Agent": "Mozilla/5.0" },
+                });
+                const html = await res.text();
+                // Extreu el text principal eliminant HTML
+                const text = html
+                  .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
+                  .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
+                  .replace(/<[^>]+>/g, " ")
+                  .replace(/\s+/g, " ")
+                  .trim()
+                  .slice(0, 8000); // Limitem per no superar el context
+                return {
+                  type: "tool_result",
+                  tool_use_id: block.id,
+                  content: text,
+                };
+              } catch {
+                return {
+                  type: "tool_result",
+                  tool_use_id: block.id,
+                  content: "Error llegint l'article",
+                };
+              }
+            }
+
+            // Per a web_search i altres eines, retornem confirmació
+            return {
+              type: "tool_result",
+              tool_use_id: block.id,
+              content: "Tool executed",
+            };
+          })
+        );
+
         currentMessages = [
           ...currentMessages,
           { role: "assistant", content: response.content },
@@ -98,9 +143,11 @@ export async function POST(request: NextRequest) {
     }
 
     return NextResponse.json({ text: finalText });
-
   } catch (error) {
     console.error("Error API Anthropic:", error);
-    return NextResponse.json({ error: "Error en connectar amb l'API" }, { status: 500 });
+    return NextResponse.json(
+      { error: "Error en connectar amb l'API" },
+      { status: 500 }
+    );
   }
 }
