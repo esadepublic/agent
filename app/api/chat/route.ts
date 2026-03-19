@@ -1,6 +1,5 @@
 // app/api/chat/route.ts
 // Backend segur — la clau ANTHROPIC_API_KEY mai arriba al navegador.
-// Llegeix els articles de PUBLIC directament i extreu autors i data.
  
 /* eslint-disable @typescript-eslint/no-explicit-any */
  
@@ -22,63 +21,125 @@ interface ChatRequest {
   lang: Lang;
 }
  
-// Llegeix un article de PUBLIC i retorna el contingut net amb metadades
+// Llegeix un article de PUBLIC i retorna un bloc de text estructurat
+// amb URL, títol, data, autors i contingut — tot extret del HTML real.
 async function fetchArticle(url: string): Promise<string> {
   try {
     const res = await fetch(url, {
-      headers: { "User-Agent": "Mozilla/5.0", "Accept-Language": "ca" },
+      headers: {
+        "User-Agent": "Mozilla/5.0 (compatible; PublicAgent/1.0)",
+        "Accept-Language": "ca,es;q=0.9",
+      },
       signal: AbortSignal.timeout(8000),
     });
-    if (!res.ok) return `Error llegint ${url}`;
+    if (!res.ok) return "";
+ 
     const html = await res.text();
  
-    // Extreu el títol
-    const titleMatch = html.match(/<h3[^>]*>\s*<a[^>]*>([^<]+)<\/a>\s*<\/h3>/);
-    const title = titleMatch ? titleMatch[1].trim() : "";
- 
-    // Extreu data i autors: apareixen entre el segon "---" i el tercer "---"
-    // Estructura real: ... <img...> --- [data] [autors] [comentaris] ---
-    // En el HTML, data i autors estan en un bloc separat per <hr> tags
-    
-    // Data: format "febrer, 01 2026" o "01-02-2026"
-    const dateMatch = html.match(
-      /(\d{2}-\d{2}-\d{4})|((gener|febrer|març|abril|maig|juny|juliol|agost|setembre|octubre|novembre|desembre|enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre|january|february|march|april|may|june|july|august|september|october|november|december),?\s+\d{1,2}\s+\d{4})/i
-    );
-    const date = dateMatch ? dateMatch[0].trim() : "";
- 
-    // Autors: apareixen just després de la data i abans de "Comentaris/Comentarios/Comments"
-    // En el HTML net (sense tags), la seqüència és: [data]\n\n[autors]\n\n[X Comentaris]
-    const cleanText = html
-      .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
-      .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
+    // --- Extreu el text net eliminant scripts, styles i tags HTML ---
+    const clean = html
+      .replace(/<script[\s\S]*?<\/script>/gi, "")
+      .replace(/<style[\s\S]*?<\/style>/gi, "")
+      .replace(/<!--[\s\S]*?-->/g, "")
       .replace(/<[^>]+>/g, "\n")
+      .replace(/&nbsp;/g, " ")
+      .replace(/&amp;/g, "&")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&quot;/g, '"')
+      .replace(/&#039;/g, "'")
+      .replace(/[ \t]+/g, " ")
+      .replace(/\n[ \t]+/g, "\n")
       .replace(/\n{3,}/g, "\n\n")
       .trim();
  
-    // Busquem la seqüència: data → autors → comentaris
-    const authorMatch = cleanText.match(
-      /(?:(?:\d{2}-\d{2}-\d{4})|(?:(?:gener|febrer|març|abril|maig|juny|juliol|agost|setembre|octubre|novembre|desembre|enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre|january|february|march|april|may|june|july|august|september|october|november|december)[^\n]+\d{4}))\s*\n+\s*([^\n]+)\s*\n+\s*\d+\s*(?:Comentaris|Comentarios|Comments)/i
+    // --- Extreu el títol: és el primer h3 o el text del <title> ---
+    const titleTagMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
+    const rawTitle = titleTagMatch ? titleTagMatch[1] : "";
+    // "Public :: Títol de l'article" → agafem la part després de "::"
+    const title = rawTitle.includes("::")
+      ? rawTitle.split("::")[1].trim()
+      : rawTitle.trim();
+ 
+    // --- Extreu data i autors ---
+    // Estructura real del HTML net:
+    //   [títol]
+    //   [primer paràgraf de l'article]
+    //   [imatge → text buit]
+    //   ---
+    //   [mes, dd yyyy]          ← DATA
+    //   [autors]                ← AUTORS
+    //   [N Comentaris]
+    //   ---
+    //   [resta del contingut]
+    //
+    // Busquem el patró: data → línia d'autors → "Comentaris/Comentarios/Comments"
+ 
+    const mesos = "gener|febrer|març|abril|maig|juny|juliol|agost|setembre|octubre|novembre|desembre|enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre|january|february|march|april|may|june|july|august|september|october|november|december";
+ 
+    // Patró 1: "mes, dd yyyy" (format català/castellà del lloc)
+    const datePattern1 = new RegExp(
+      `((?:${mesos}),?\\s+\\d{1,2}\\s+\\d{4})\\s*\\n+\\s*([^\\n]+?)\\s*\\n+\\s*\\d+\\s*(?:Comentaris|Comentarios|Comments)`,
+      "i"
     );
-    const authors = authorMatch ? authorMatch[1].trim() : "";
  
-    // Extreu el contingut principal (entre el primer i l'últim separador de contingut)
-    // Eliminem capçalera, peu i botons
-    const bodyStart = cleanText.indexOf(title || "");
-    const bodyEnd = cleanText.indexOf("Compartir aquesta");
-    const body = bodyStart >= 0 && bodyEnd > bodyStart
-      ? cleanText.slice(bodyStart, bodyEnd).trim()
-      : cleanText.slice(0, 6000);
+    // Patró 2: "dd-mm-yyyy" (format alternatiu)
+    const datePattern2 = new RegExp(
+      `(\\d{2}-\\d{2}-\\d{4})\\s*\\n+\\s*([^\\n]+?)\\s*\\n+\\s*\\d+\\s*(?:Comentaris|Comentarios|Comments)`,
+      "i"
+    );
  
-    return `URL: ${url}
-TÍTOL: ${title}
-DATA: ${date}
-AUTORS: ${authors || "Redacció"}
-CONTINGUT:
-${body.slice(0, 5000)}`;
+    let date = "";
+    let authors = "";
  
+    const match1 = clean.match(datePattern1);
+    const match2 = clean.match(datePattern2);
+ 
+    if (match1) {
+      date = match1[1].trim();
+      authors = match1[2].trim();
+    } else if (match2) {
+      date = match2[1].trim();
+      authors = match2[2].trim();
+    }
+ 
+    // Validació: si "authors" conté text típic de nav (Subscripcions, etc.), és fals
+    const navKeywords = ["subscripcions", "identificar", "consell", "assessor", "partners"];
+    if (navKeywords.some((k) => authors.toLowerCase().includes(k))) {
+      authors = "";
+    }
+ 
+    // Si no hem trobat autors, posem "Redacció"
+    if (!authors) authors = "Redacció";
+ 
+    // --- Extreu el contingut principal ---
+    // Comença al títol i acaba a "Compartir aquesta notícia" o "Compartir esta"
+    const contentStart = title ? clean.indexOf(title) : 0;
+    const contentEnd = clean.search(/Compartir (?:aquesta notícia|esta noticia|this)/i);
+    const body =
+      contentStart >= 0 && contentEnd > contentStart
+        ? clean.slice(contentStart, contentEnd).trim()
+        : clean.slice(0, 5000).trim();
+ 
+    return [
+      `URL: ${url}`,
+      `TÍTOL: ${title}`,
+      `DATA: ${date}`,
+      `AUTORS: ${authors}`,
+      `CONTINGUT:`,
+      body.slice(0, 4500),
+    ].join("\n");
   } catch {
-    return `Error llegint l'article: ${url}`;
+    return "";
   }
+}
+ 
+// Extreu totes les URLs de PUBLIC d'un bloc de text
+function extractPublicUrls(text: string): string[] {
+  const matches = text.matchAll(
+    /https?:\/\/esadepublic\.esade\.edu\/posts\/post\/[a-zA-Z0-9_-]+/g
+  );
+  return [...new Set([...matches].map((m) => m[0]))].slice(0, 5);
 }
  
 export async function POST(request: NextRequest) {
@@ -128,6 +189,7 @@ export async function POST(request: NextRequest) {
         messages: currentMessages,
       });
  
+      // Recollim text de la resposta
       const textBlocks = (response.content as any[])
         .filter((b: any) => b.type === "text")
         .map((b: any) => b.text)
@@ -141,66 +203,39 @@ export async function POST(request: NextRequest) {
           (b: any) => b.type === "tool_use"
         );
  
+        // Processem cada tool_use
         const toolResults = await Promise.all(
           toolUseBlocks.map(async (block: any) => {
-            // Si l'agent demana llegir un article de PUBLIC, el llegim nosaltres
-            // i li retornem el contingut amb autors i data ben extrets
-            if (
-              block.name === "web_search" &&
-              typeof block.input?.query === "string" &&
-              block.input.query.includes("esadepublic.esade.edu/posts")
-            ) {
-              // Deixem que web_search funcioni normalment
-              return {
-                type: "tool_result",
-                tool_use_id: block.id,
-                content: "Tool executed",
-              };
-            }
- 
-            // Per a qualsevol altra eina
+            // Retornem sempre "Tool executed" — els resultats reals
+            // els afegim com a context addicional just a continuació
             return {
-              type: "tool_result",
+              type: "tool_result" as const,
               tool_use_id: block.id,
               content: "Tool executed",
             };
           })
         );
  
-        // Detectem si la resposta de cerca conté URLs de PUBLIC
-        // i les llegim proactivament per afegir metadades
-        const searchResultsText = (response.content as any[])
-          .filter((b: any) => b.type === "tool_use" && b.name === "web_search")
-          .map((b: any) => JSON.stringify(b.input))
-          .join(" ");
+        // Serialitzem tota la resposta per buscar-hi URLs de PUBLIC
+        const responseText = JSON.stringify(response.content);
+        const publicUrls = extractPublicUrls(responseText);
  
-        // Extraiem URLs de PUBLIC dels resultats (les passarem a l'agent)
-        const publicUrls = [
-          ...new Set(
-            [...(searchResultsText.matchAll(/https:\/\/esadepublic\.esade\.edu\/posts\/post\/[a-z0-9-]+/g))]
-              .map((m) => m[0])
-              .slice(0, 4) // Màxim 4 articles per no superar el temps
-          ),
-        ];
- 
-        // Si hem trobat URLs, les llegim i injectem el contingut com a context addicional
+        // Llegim els articles trobats en paral·lel
         let articleContext = "";
         if (publicUrls.length > 0) {
-          const articleContents = await Promise.all(
-            publicUrls.map((url) => fetchArticle(url))
-          );
-          articleContext =
-            "\n\n[CONTINGUT DELS ARTICLES LLEGITS AL SERVIDOR]\n" +
-            articleContents.join("\n\n---\n\n");
+          const articles = await Promise.all(publicUrls.map(fetchArticle));
+          const validArticles = articles.filter((a) => a.length > 0);
+          if (validArticles.length > 0) {
+            articleContext =
+              "\n\n[ARTICLES LLEGITS — usa els camps TÍTOL, DATA i AUTORS exactament tal com apareixen]\n\n" +
+              validArticles.join("\n\n---\n\n");
+          }
         }
  
-        // Afegim el context dels articles als tool results
-        const enrichedResults = toolResults.map((r: any, idx: number) => {
-          if (idx === 0 && articleContext) {
-            return { ...r, content: "Tool executed" + articleContext };
-          }
-          return r;
-        });
+        // Afegim el context dels articles al primer tool result
+        const enrichedResults = toolResults.map((r, idx) =>
+          idx === 0 ? { ...r, content: r.content + articleContext } : r
+        );
  
         currentMessages = [
           ...currentMessages,
